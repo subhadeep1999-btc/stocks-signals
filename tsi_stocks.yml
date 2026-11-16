@@ -1,0 +1,77 @@
+name: tsi-stocks
+
+on:
+  workflow_dispatch:
+    inputs:
+      cmd:
+        description: "scan = normal run | login-link = send me the FYERS login link | login = save today's login | check = test one stock"
+        default: "scan"
+        type: choice
+        options:
+          - scan
+          - login-link
+          - login
+          - check
+      auth_code:
+        description: "Only for cmd = login: paste the WHOLE address of the page you land on after FYERS login"
+        required: false
+        default: ""
+
+concurrency:
+  group: tsi-stocks
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Today's date (IST)
+        run: echo "DAY=$(TZ=Asia/Kolkata date +%F)" >> "$GITHUB_ENV"
+
+      - name: Restore today's FYERS login
+        uses: actions/cache/restore@v4
+        with:
+          path: .token
+          key: fyers-token-${{ env.DAY }}-none
+          restore-keys: |
+            fyers-token-${{ env.DAY }}-
+
+      - name: Run the stock signals
+        env:
+          FYERS_APP_ID: ${{ secrets.FYERS_APP_ID }}
+          FYERS_APP_SECRET: ${{ secrets.FYERS_APP_SECRET }}
+          FYERS_REDIRECT_URI: ${{ vars.FYERS_REDIRECT_URI }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          AUTH_CODE: ${{ inputs.auth_code }}
+        run: python tsi_stocks.py --${{ inputs.cmd || 'scan' }}
+
+      - name: Keep today's FYERS login for the next runs
+        if: ${{ inputs.cmd == 'login' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .token
+          key: fyers-token-${{ env.DAY }}-${{ github.run_id }}
+
+      - name: Save bot memory
+        if: always()
+        run: |
+          git config user.name "tsi-stocks"
+          git config user.email "tsi-stocks@users.noreply.github.com"
+          for f in stock_state.json; do [ -f "$f" ] && git add -f "$f"; done || true
+          git commit -m "stock state" || echo "nothing to save"
+          git pull --rebase || true
+          git push || true
