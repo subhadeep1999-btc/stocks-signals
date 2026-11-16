@@ -46,6 +46,7 @@ REMIND_AT = env("EOD_NOTE_IST", "15:15")                # one note per day listi
 MAX_AGE_MIN = int(env("MAX_SIGNAL_AGE_MIN", "100"))      # a BUY reading older than this when we see it is not alerted
 TG_TOKEN, TG_CHAT_ID = FD.TG_TOKEN, FD.TG_CHAT_ID
 MIN_BARS = 150
+PROBE_MAX_SEC = int(env("PROBE_MAX_SEC", "90"))           # how long a run waits for FYERS to publish the candle that just closed
 EMA_LEN = int(env("EMA_LEN", "5"))
 
 
@@ -339,6 +340,32 @@ def performance_line(sym, h, c15, rs, es=None):
                 sym, h["entry_label"], e, px, (px / e - 1) * 100, days, hi, (hi / e - 1) * 100, lo, (lo / e - 1) * 100, tsi, ema_text(es)))
 
 
+def wait_for_candle(token, sym, now):
+    """Runs start right on a quarter-hour. FYERS may need a few seconds to publish the 15m candle that just closed, so
+    wait (checking one stock every 8 s, at most PROBE_MAX_SEC) until it is there."""
+    now_ts = int(now.timestamp())
+    exp_start = (now_ts // 900) * 900 - 900                     # IST is a whole number of quarter-hours from UTC
+    d = datetime.fromtimestamp(exp_start, IST)
+    if d.date() != now.date() or not (SESSION_START <= d.hour * 60 + d.minute <= SESSION_END - 15):
+        return True
+    waited = 0
+    while True:
+        try:
+            if any(int(c[0]) == exp_start for c in FD.history(token, fyers_symbol(sym), resolution="15", days=3)):
+                if waited:
+                    print("candle %s appeared after %d s" % (fmt_time(exp_start), waited), flush=True)
+                return True
+        except FD.RateLimited:
+            return False
+        except FD.FyersError as e:
+            print("probe problem:", e, flush=True)
+        if waited >= PROBE_MAX_SEC:
+            print("candle %s not published after %d s - scanning anyway" % (fmt_time(exp_start), waited), flush=True)
+            return False
+        time.sleep(8)
+        waited += 8
+
+
 def scan(token, st, now):
     now_ts = int(now.timestamp())
     today = now.strftime("%Y-%m-%d")
@@ -355,6 +382,8 @@ def scan(token, st, now):
     # before the first reading of the day (10:45) nothing new can exist: only look at your positions
     syms = sorted(set(holdings)) if minute < hm("10:40") else sorted(set(FD.short(s) for s in FD.symbols()) | set(holdings))
     watermarks = st.setdefault("watermark", {})
+    if syms:
+        wait_for_candle(token, syms[0], now)
     buys, emas, exits, errors, scanned, stopped = [], [], [], [], 0, None
     seen = {}
     for n, sym in enumerate(syms):
@@ -380,7 +409,7 @@ def scan(token, st, now):
         es = ema_signals(c15)
         seen[sym] = (c15, rs, es)
         mark = watermarks.get(sym)
-        watermarks[sym] = now_ts
+        watermarks[sym] = min(now_ts, c15[-1][0] + 900)         # never move past data FYERS has not published yet
         h = holdings.get(sym)
         if h is not None and not h.get("entry_ts"):             # a stock you just told me about: find its bullish crossover
             h["entry_ts"], h["entry_price"], h["entry_label"], warn = entry_from(rs, c15, es)
