@@ -30,7 +30,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -178,11 +178,19 @@ def save_state(st):
         json.dump(st, f, indent=1, sort_keys=True)
 
 
-def load_token(today):
+def load_token(today, now=None):
+    """Today's saved login. A FYERS login dies at 6:30 AM, so one made at 00:34 is already dead by 9:30."""
     try:
         with open(TOKEN_FILE) as f:
             j = json.load(f)
         if j.get("day") == today and j.get("token"):
+            if now is not None and j.get("ts"):
+                made = datetime.fromtimestamp(j["ts"], IST)
+                dies = made.replace(hour=6, minute=30, second=0, microsecond=0)
+                if dies <= made:
+                    dies += timedelta(days=1)
+                if now >= dies:
+                    return None
             return j["token"]
     except Exception:
         pass
@@ -596,7 +604,7 @@ def wait_for_login(st, now, minutes):
 def save_token(token, now):
     os.makedirs(os.path.dirname(TOKEN_FILE) or ".", exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
-        json.dump({"day": now.strftime("%Y-%m-%d"), "token": token}, f)
+        json.dump({"day": now.strftime("%Y-%m-%d"), "token": token, "ts": int(now.timestamp())}, f)
     with open(NEW_TOKEN_MARK, "w") as f:
         f.write("new")
 
@@ -671,12 +679,12 @@ def main():
             telegram_login(st, now, LOGIN_WAIT_MIN)
             return
         if "--refresh" in sys.argv:
-            if load_token(today) is None:
+            if load_token(today, now) is None:
                 why = try_refresh(now)
                 if why:
                     telegram_login(st, now, LOGIN_WAIT_MIN, why)
             return
-        token = load_token(today)
+        token = load_token(today, now)
         if not token:
             if st.get("login_alert") == today:
                 print("No FYERS token for today.")
@@ -685,7 +693,7 @@ def main():
             why = try_refresh(now)                               # last chance to log in by itself
             if why and not telegram_login(st, now, SCAN_LOGIN_WAIT_MIN, why):
                 return
-            token = load_token(today)
+            token = load_token(today, now)
             if not token:
                 return
         if "--check" in sys.argv:
