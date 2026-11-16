@@ -4,11 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       cmd:
-        description: "scan = normal run | login-link = send me the FYERS login link | login = save today's login | check = test one stock"
+        description: "scan = normal run | refresh = automatic morning login | login-link = send me the login link on Telegram | login = (old way) save the code typed below | check = test one stock"
         default: "scan"
         type: choice
         options:
           - scan
+          - refresh
           - login-link
           - login
           - check
@@ -27,7 +28,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +49,7 @@ jobs:
           key: fyers-token-${{ env.DAY }}-none
           restore-keys: |
             fyers-token-${{ env.DAY }}-
+            fyers-token-
 
       - name: Run the stock signals
         env:
@@ -56,11 +58,12 @@ jobs:
           FYERS_REDIRECT_URI: ${{ vars.FYERS_REDIRECT_URI }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          FYERS_PIN: ${{ secrets.FYERS_PIN }}
           AUTH_CODE: ${{ inputs.auth_code }}
         run: python tsi_stocks.py --${{ inputs.cmd || 'scan' }}
 
       - name: Keep today's FYERS login for the next runs
-        if: ${{ inputs.cmd == 'login' }}
+        if: ${{ hashFiles('.token/new') != '' }}
         uses: actions/cache/save@v4
         with:
           path: .token
