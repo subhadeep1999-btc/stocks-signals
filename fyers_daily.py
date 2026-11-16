@@ -115,7 +115,11 @@ def auth_code_from(text):
     return text
 
 
+LAST_REFRESH = None                                  # the refresh token FYERS returned with the last login
+
+
 def get_token(code):
+    global LAST_REFRESH
     need_settings()
     if not code:
         raise SystemExit("No auth_code given. Run --login-link first, log in, and paste the whole page address into the auth_code box.")
@@ -139,7 +143,24 @@ def get_token(code):
         raise FyersError("Login failed: FYERS says \"%s\" (code %s). %s. If it says invalid auth code: the code works once and only "
                          "for a minute or two - get a new login link and paste faster. If it mentions the app id or hash: check FYERS_APP_ID "
                          "and FYERS_APP_SECRET." % (j.get("message") or j, j.get("code"), seen))
+    LAST_REFRESH = j.get("refresh_token")
     return j["access_token"]
+
+
+def refresh_access(refresh_token, pin):
+    """Daily renewal: refresh token (valid 15 days) + your FYERS PIN -> new access token. Returns (access_token, new_refresh_token or None)."""
+    need_settings()
+    body = {"grant_type": "refresh_token",
+            "appIdHash": hashlib.sha256(("%s:%s" % (APP_ID, APP_SECRET)).encode()).hexdigest(),
+            "refresh_token": refresh_token, "pin": pin}
+    r = requests.post(AUTH_BASE + "/validate-refresh-token", json=body, timeout=30)
+    try:
+        j = r.json()
+    except Exception:
+        raise FyersError("Renewal failed: HTTP %s %s" % (r.status_code, r.text[:150]))
+    if j.get("s") != "ok" or not j.get("access_token"):
+        raise FyersError("Renewal failed: FYERS says \"%s\" (code %s)" % (j.get("message") or j, j.get("code")))
+    return j["access_token"], j.get("refresh_token")
 
 
 def history(token, symbol, resolution="D", days=None):

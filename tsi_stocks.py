@@ -21,7 +21,7 @@ TSI signals for Indian stocks on FYERS data (signals only - this program never p
     (or sending: out RELIANCE) makes it stop tracking that stock.
   * Intraday or overnight is your decision: positions stay tracked until you press Out. Other messages: list | help
 
-Commands (GitHub workflow "tsi-stocks"):  --login-link | --login | --check | --scan
+Commands (GitHub workflow "tsi-stocks"):  --login-link | --login | --refresh | --check | --scan
 The FYERS token (valid until 6:30 AM next day) is kept in the GitHub Actions cache by the workflow, never in the repo.
 """
 import bisect
@@ -39,6 +39,11 @@ from fyers_daily import IST, env, send
 
 STATE_FILE = env("STOCK_STATE_FILE", "stock_state.json")
 TOKEN_FILE = env("FYERS_TOKEN_FILE", ".token/fyers_token.json")
+REFRESH_FILE = env("FYERS_REFRESH_FILE", ".token/fyers_refresh.json")
+NEW_TOKEN_MARK = env("FYERS_NEWTOKEN_MARK", ".token/new")      # exists only when THIS run created a new login (the workflow then caches it)
+LOGIN_WAIT_MIN = int(env("LOGIN_WAIT_MIN", "15"))             # minutes the morning run waits for the code you send on Telegram
+SCAN_LOGIN_WAIT_MIN = int(env("SCAN_LOGIN_WAIT_MIN", "5"))
+REFRESH_DAYS = 15                                         # a FYERS refresh token lasts 15 days
 HIST_DAYS = int(env("HIST_DAYS", "45"))                    # calendar days of 15m candles (about 30 trading days)
 SESSION_START, SESSION_END = 9 * 60 + 15, 15 * 60 + 30    # minutes of the day, IST
 LAST_ENTRY = env("LAST_ENTRY_IST", "15:30")               # BUY alerts are sent for readings known up to this time (15:30 = the whole session)
@@ -271,6 +276,13 @@ def poll_commands(st, now_ts):
         text = (m.get("text") or "").strip()
         when = int(m.get("date") or now_ts)
         low = text.lower()
+        if looks_like_code(text):
+            tg_delete(m.get("message_id"))
+            try:
+                cmd_login(text, datetime.now(IST))
+            except FD.FyersError as e:
+                replies.append(("❌ That code did not work (%s)." % e, None))
+            continue
         mo = re.match(r"^/?(out|sell|sold|exit|close)(?:@\w+)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)
         mi = re.match(r"^/?(in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)   # the old long form still works
         if mo:
@@ -531,42 +543,159 @@ def cmd_check(token, now):
     print("Check finished: no orders exist in this program.")
 
 
-def cmd_login(code, now):
-    token = FD.get_token(code)
+def looks_like_code(text):
+    t = (text or "").strip()
+    return "auth_code=" in t or (len(t) >= 80 and " " not in t)
+
+
+def tg_delete(message_id):
+    try:
+        requests.post("https://api.telegram.org/bot%s/deleteMessage" % TG_TOKEN, data={"chat_id": TG_CHAT_ID, "message_id": message_id}, timeout=10)
+    except Exception:
+        pass
+
+
+def login_prompt(minutes):
+    send("🔑 FYERS login needed today.\n\n1) Press and hold this link, choose Copy, open it in Chrome and log in:\n%s\n\n"
+         "2) You land on a page showing the authorisation code. Press and hold the long code, select all, copy it.\n"
+         "3) SEND THE CODE TO ME HERE in this chat. Do it quickly - the code lives only a minute or two.\n\n"
+         "I am listening for %d minutes." % (FD.login_link(), minutes))
+
+
+def wait_for_login(st, now, minutes):
+    """Listen on Telegram for the code you send. Returns True when the login worked."""
+    deadline = time.time() + minutes * 60
+    while time.time() < deadline:
+        try:
+            r = requests.get("https://api.telegram.org/bot%s/getUpdates" % TG_TOKEN,
+                             params={"offset": st.get("tg_offset", 0), "timeout": 15}, timeout=30).json()
+        except Exception as e:
+            print("Telegram read failed:", e, flush=True)
+            time.sleep(3)
+            continue
+        for u in r.get("result", []) if r.get("ok") else []:
+            m = u.get("message") or {}
+            if str((m.get("chat") or {}).get("id")) != str(TG_CHAT_ID):
+                st["tg_offset"] = u["update_id"] + 1
+                continue
+            text = (m.get("text") or "").strip()
+            if not looks_like_code(text):
+                continue                                         # keep other messages for the normal scan
+            st["tg_offset"] = u["update_id"] + 1
+            tg_delete(m.get("message_id"))
+            try:
+                cmd_login(text, datetime.now(IST))
+                return True
+            except FD.FyersError as e:
+                send("❌ That code did not work (%s). Tap the link again and send me a fresh code." % e)
+        time.sleep(2)
+    send("⏰ I did not get a login code in %d minutes. Run login-link in GitHub or wait for the next prompt." % minutes)
+    return False
+
+
+def save_token(token, now):
     os.makedirs(os.path.dirname(TOKEN_FILE) or ".", exist_ok=True)
     with open(TOKEN_FILE, "w") as f:
         json.dump({"day": now.strftime("%Y-%m-%d"), "token": token}, f)
-    send("✅ FYERS login OK for %s. The stock scans can run now." % now.strftime("%d %b %Y"))
+    with open(NEW_TOKEN_MARK, "w") as f:
+        f.write("new")
+
+
+def save_refresh(refresh, now):
+    os.makedirs(os.path.dirname(REFRESH_FILE) or ".", exist_ok=True)
+    with open(REFRESH_FILE, "w") as f:
+        json.dump({"refresh_token": refresh, "issued": now.strftime("%Y-%m-%d")}, f)
+
+
+def cmd_login(code, now):
+    token = FD.get_token(code)
+    save_token(token, now)
+    extra = ""
+    if FD.LAST_REFRESH:
+        save_refresh(FD.LAST_REFRESH, now)
+        extra = " Automatic daily renewal is armed for the next %d days." % REFRESH_DAYS
+    send("✅ FYERS login OK for %s. The stock scans can run now.%s" % (now.strftime("%d %b %Y"), extra))
+
+
+def try_refresh(now):
+    """Every morning: get today's token without you (FYERS_PIN secret + the refresh token of your last login).
+    Returns "" when it worked, otherwise the reason it did not."""
+    pin = env("FYERS_PIN")
+    if not pin:
+        return "no FYERS_PIN secret is set"
+    try:
+        with open(REFRESH_FILE) as f:
+            r = json.load(f)
+        refresh, issued = r["refresh_token"], r.get("issued", "")
+    except Exception:
+        return "no refresh token saved yet (this is normal before your first login)"
+    try:
+        token, new_refresh = FD.refresh_access(refresh, pin)
+    except FD.FyersError as e:
+        return str(e)
+    save_token(token, now)
+    if new_refresh:
+        save_refresh(new_refresh, now)
+        issued = now.strftime("%Y-%m-%d")
+    try:
+        left = REFRESH_DAYS - (now.date() - datetime.strptime(issued, "%Y-%m-%d").date()).days
+    except Exception:
+        left = None
+    note = ""
+    if left is not None:
+        note = " Manual login is needed again in about %d day(s)." % max(left, 0) if left <= 4 else " (%d days of automatic renewal left)" % left
+    send("✅ FYERS auto-login OK for %s.%s" % (now.strftime("%d %b %Y"), note))
+    return ""
+
+
+def telegram_login(st, now, minutes, why=""):
+    if why:
+        print("Automatic renewal did not work:", why, flush=True)
+    login_prompt(minutes)
+    return wait_for_login(st, now, minutes)
 
 
 def main():
     now = datetime.now(IST)
-    if "--login-link" in sys.argv:
-        send("🔑 FYERS login (valid for today):\n%s\n\nLog in, then copy the WHOLE address of the page you land on and paste it into "
-             "the auth_code box of the tsi-stocks workflow (choose cmd = login)." % FD.login_link())
-        return
+    today = now.strftime("%Y-%m-%d")
+    try:
+        os.remove(NEW_TOKEN_MARK)                                # set again only if this run creates a login
+    except OSError:
+        pass
     if "--login" in sys.argv:
         cmd_login(env("AUTH_CODE"), now)
         return
-    token = load_token(now.strftime("%Y-%m-%d"))
-    if not token:
-        st = load_state()
-        if st.get("login_alert") != now.strftime("%Y-%m-%d"):
-            send("🔑 FYERS login needed today. Run the tsi-stocks workflow with cmd = login-link, log in, then cmd = login with the address you land on.")
-            st["login_alert"] = now.strftime("%Y-%m-%d")
-            save_state(st)
-        print("No FYERS token for today.")
-        return
-    if "--check" in sys.argv:
-        cmd_check(token, now)
-    elif "--scan" in sys.argv:
-        st = load_state()
-        try:
+    st = load_state()
+    try:
+        if "--login-link" in sys.argv:
+            telegram_login(st, now, LOGIN_WAIT_MIN)
+            return
+        if "--refresh" in sys.argv:
+            if load_token(today) is None:
+                why = try_refresh(now)
+                if why:
+                    telegram_login(st, now, LOGIN_WAIT_MIN, why)
+            return
+        token = load_token(today)
+        if not token:
+            if st.get("login_alert") == today:
+                print("No FYERS token for today.")
+                return
+            st["login_alert"] = today
+            why = try_refresh(now)                               # last chance to log in by itself
+            if why and not telegram_login(st, now, SCAN_LOGIN_WAIT_MIN, why):
+                return
+            token = load_token(today)
+            if not token:
+                return
+        if "--check" in sys.argv:
+            cmd_check(token, now)
+        elif "--scan" in sys.argv:
             scan(token, st, now)
-        finally:
-            save_state(st)
-    else:
-        raise SystemExit("Use --login-link, --login, --check or --scan.")
+        else:
+            raise SystemExit("Use --login-link, --login, --refresh, --check or --scan.")
+    finally:
+        save_state(st)
 
 
 if __name__ == "__main__":
