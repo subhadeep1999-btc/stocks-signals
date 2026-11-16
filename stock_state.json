@@ -1,9 +1,10 @@
 {
- "day": "2026-11-16",
+ "day": "2026-11-17",
  "holdings": {},
- "login_alert": "2026-11-16",
+ "login_alert": "2026-11-17",
  "reminded": false,
- "summary": true,
+ "summary": false,
+ "tg_offset": 758828004,
  "watermark": {
   "ADANIENSOL": 1794823200,
   "ADANIENT": 1794823200,
