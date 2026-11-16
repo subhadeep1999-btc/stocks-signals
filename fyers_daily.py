@@ -119,17 +119,26 @@ def get_token(code):
     need_settings()
     if not code:
         raise SystemExit("No auth_code given. Run --login-link first, log in, and paste the whole page address into the auth_code box.")
+    raw = (code or "").strip()
+    got = auth_code_from(code)
+    seen = "pasted %d characters; contains 'auth_code=': %s; code length %d; app id %s, secret %d characters" % (
+        len(raw), "auth_code=" in raw, len(got), APP_ID, len(APP_SECRET))
+    print(seen, flush=True)
+    if len(got) < 40 or got.lower().startswith("http"):
+        raise FyersError("Login failed: what you pasted is not the page address after logging in to FYERS (%s). Tap the login link, log in "
+                         "to FYERS, then copy the WHOLE address of the page you land on - it contains auth_code=" % seen)
     body = {"grant_type": "authorization_code",
             "appIdHash": hashlib.sha256(("%s:%s" % (APP_ID, APP_SECRET)).encode()).hexdigest(),
-            "code": auth_code_from(code)}
+            "code": got}
     r = requests.post(AUTH_BASE + "/validate-authcode", json=body, timeout=30)
     try:
         j = r.json()
     except Exception:
         raise FyersError("Login failed: HTTP %s %s" % (r.status_code, r.text[:200]))
     if j.get("s") != "ok" or not j.get("access_token"):
-        raise FyersError("Login failed: %s (the code works once and only for a few minutes - get a new login link)"
-                         % (j.get("message") or j))
+        raise FyersError("Login failed: FYERS says \"%s\" (code %s). %s. If it says invalid auth code: the code works once and only "
+                         "for a minute or two - get a new login link and paste faster. If it mentions the app id or hash: check FYERS_APP_ID "
+                         "and FYERS_APP_SECRET." % (j.get("message") or j, j.get("code"), seen))
     return j["access_token"]
 
 
