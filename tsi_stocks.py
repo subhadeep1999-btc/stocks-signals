@@ -74,21 +74,26 @@ def completed_15m(candles, now_ts):
     return out
 
 
-def aggregate(c15, length_min):
+def aggregate(c15, length_min, merge_tail=False):
     """Session-aligned candles built from 15m candles. A candle is kept only if ALL its 15m parts exist."""
     groups = {}
+    full = (SESSION_END - SESSION_START) // length_min
     for (t, o, h, l, c) in c15:
         dt = datetime.fromtimestamp(t, IST)
         m = dt.hour * 60 + dt.minute
         if m < SESSION_START or m >= SESSION_END:
             continue
         slot = (m - SESSION_START) // length_min
+        if merge_tail and slot >= full:
+            slot = full - 1                                   # TradingView has no separate 15:15-15:30 45m candle: it belongs to the 14:30 one
         groups.setdefault((dt.date(), slot), []).append((t, o, h, l, c))
     bars = []
     for (d, slot), g in sorted(groups.items()):
         g.sort()
         start_m = SESSION_START + slot * length_min
         end_m = min(start_m + length_min, SESSION_END)
+        if merge_tail and slot == full - 1:
+            end_m = SESSION_END
         if len(g) != (end_m - start_m) // 15:
             continue
         first = datetime.fromtimestamp(g[0][0], IST)
@@ -99,20 +104,35 @@ def aggregate(c15, length_min):
     return bars
 
 
+TSI_SRC = env("TSI_SOURCE", "hl2")                      # the price the 45m TSI is built from (matched TradingView best)
+
+
+def b45_bars(c15):
+    return aggregate(c15, 45, merge_tail=True)
+
+
+def src45(bars):
+    if TSI_SRC == "close":
+        return [b["c"] for b in bars]
+    return [(b["h"] + b["l"]) / 2.0 for b in bars]
+
+
 def readings(c15):
-    """One reading per finished 1h candle: (1h candle, 45m candle read, tsi, signal, diff) in time order."""
-    b45, b60 = aggregate(c15, 45), aggregate(c15, 60)
+    """One reading per finished 1h candle, taken at that 1h candle's close (10:15, 11:15 ... 15:15), exactly what a chart set to
+    '45m, wait for timeframe closes' shows at that moment: the newest 45m candle that has FINISHED by then."""
+    b45, b60 = b45_bars(c15), aggregate(c15, 60)
     if len(b45) < MIN_BARS:
         return []
-    tsi, sig = FD.tsi_series([b["c"] for b in b45])
-    index = {(b["date"], b["start_m"]): k for k, b in enumerate(b45)}
+    tsi, sig = FD.tsi_series(src45(b45))
+    ends45 = [b["end"] for b in b45]
     out = []
     for hb in b60:
-        k45 = (hb["end_m"] - SESSION_START - 1) // 45          # last 45m candle that OPENED before this 1h candle closed
-        j = index.get((hb["date"], SESSION_START + k45 * 45))
-        if j is None:
-            continue                                            # that 45m candle is not finished yet
-        out.append({"h": hb, "b": b45[j], "tsi": tsi[j], "sig": sig[j], "diff": tsi[j] - sig[j]})
+        if hb["end_m"] - hb["start_m"] < 60:
+            continue                                            # the short 15:15-15:30 candle: no hourly message for it
+        k = bisect.bisect_right(ends45, hb["end"]) - 1
+        if k < 0:
+            continue
+        out.append({"h": hb, "b": b45[k], "known": hb["end"], "price": hb["c"], "tsi": tsi[k], "sig": sig[k], "diff": tsi[k] - sig[k]})
     return out
 
 
@@ -132,12 +152,12 @@ def ema_signals(c15):
     A 1h close is compared with the EMA of the last 2h candle that had already closed before that 1h candle's
     close (same side as comparing with the still-forming 2h EMA). Returns {"events": [...], "last": {...}}.
     Event: {"dir": +1 close above / -1 close below, "h": 1h candle, "close", "ema", "tsi_state": +1/-1/0, "known"}."""
-    b45, b60, b120 = aggregate(c15, 45), aggregate(c15, 60), aggregate(c15, 120)
+    b45, b60, b120 = b45_bars(c15), aggregate(c15, 60), aggregate(c15, 120)
     if len(b120) < EMA_LEN + 3 or len(b45) < MIN_BARS:
         return {"events": [], "last": None}
     e2 = FD.ema([b["c"] for b in b120], EMA_LEN)
     ends2 = [b["end"] for b in b120]
-    tsi, sig = FD.tsi_series([b["c"] for b in b45])
+    tsi, sig = FD.tsi_series(src45(b45))
     ends45 = [b["end"] for b in b45]
     rows = []
     for hb in b60:
@@ -150,6 +170,8 @@ def ema_signals(c15):
             d = tsi[k] - sig[k]
             state = 1 if d > 0 else -1 if d < 0 else 0
         side = 1 if hb["c"] > e2[j] else -1 if hb["c"] < e2[j] else 0
+        if hb["end_m"] - hb["start_m"] < 60:
+            continue
         rows.append({"h": hb, "close": hb["c"], "ema": e2[j], "side": side, "state": state, "known": hb["end"]})
     events = []
     for prev, cur in zip(rows, rows[1:]):
@@ -327,15 +349,15 @@ def entry_from(rs, c15, es):
     """Entry = the latest BULLISH signal: a bullish TSI crossover or a 1h close above the 2h 5 EMA (whichever is newer).
     Returns (entry_ts, price, label, warning)."""
     ev = crossovers(rs)
-    cands = [(e[1]["b"]["end"], e[1]["b"]["c"], "bullish TSI crossover, %s" % fmt_when(e[1]["b"]["end"])) for e in ev if e[0] == 1]
+    cands = [(e[1]["known"], e[1]["price"], "bullish TSI crossover, %s" % fmt_when(e[1]["known"])) for e in ev if e[0] == 1]
     cands += [(e["known"], e["close"], "1h close above the 2h 5 EMA, %s" % fmt_when(e["known"])) for e in es["events"] if e["dir"] == 1]
     if not cands:
         px = c15[-1][4]
         return int(c15[-1][0] + 900), px, "now (no bullish signal in the last %d days)" % HIST_DAYS, ""
     ts, px, label = max(cands, key=lambda x: x[0])
     warn = ""
-    if ev and ev[-1][0] == -1 and ev[-1][1]["b"]["end"] > ts:
-        warn = "\n⚠️ The 1h TSI already turned BEARISH on %s - you may be late." % fmt_when(ev[-1][1]["b"]["end"])
+    if ev and ev[-1][0] == -1 and ev[-1][1]["known"] > ts:
+        warn = "\n⚠️ The 1h TSI already turned BEARISH on %s - you may be late." % fmt_when(ev[-1][1]["known"])
     return ts, px, label, warn
 
 
@@ -400,7 +422,7 @@ def scan(token, st, now):
     out += poll_commands(st, now_ts)
 
     # before the first reading of the day (10:45) nothing new can exist: only look at your positions
-    syms = sorted(set(holdings)) if minute < hm("10:40") else sorted(set(FD.short(s) for s in FD.symbols()) | set(holdings))
+    syms = sorted(set(holdings)) if minute < hm("10:10") else sorted(set(FD.short(s) for s in FD.symbols()) | set(holdings))
     watermarks = st.setdefault("watermark", {})
     if syms:
         wait_for_candle(token, syms[0], now)
@@ -440,7 +462,7 @@ def scan(token, st, now):
         if mark is None:
             continue                                            # first time we see this stock: start from now, no old alerts
         for d, rd in crossovers(rs):
-            known = rd["b"]["end"]
+            known = rd["known"]
             if not (mark < known <= now_ts):
                 continue
             kt = datetime.fromtimestamp(known, IST)
@@ -467,7 +489,7 @@ def scan(token, st, now):
         if buys:
             parts.append("🟢 BULLISH 1h TSI crossover (%d):\n%s" % (len(buys), "\n".join(
                 "%s  about %.2f | 1h candle %s-%s, confirmed %s | TSI %.1f vs signal %.1f" % (
-                    sym, rd["b"]["c"], fmt_time(rd["h"]["t"]), fmt_time(rd["h"]["end"]), fmt_time(known), rd["tsi"], rd["sig"])
+                    sym, rd["price"], fmt_time(rd["h"]["t"]), fmt_time(rd["h"]["end"]), fmt_time(known), rd["tsi"], rd["sig"])
                 for sym, rd, known in sorted(buys, key=lambda x: x[0]))))
         if emas:
             lines = []
@@ -494,11 +516,11 @@ def scan(token, st, now):
         if lines:
             out.append(("☀️ Morning update - %s (price as of the last finished 15-minute candle):\n\n%s\n\nPress a button when you are out." % (
                 now.strftime("%d %b"), "\n\n".join(lines)), [[("✅ I am out of %s" % s, "out:" + s)] for s in sorted(holdings) if s in seen and holdings[s].get("entry_ts")]))
-    if holdings and not st.get("reminded") and minute >= hm(REMIND_AT):
+    if env("EOD_NOTE", "0") == "1" and holdings and not st.get("reminded") and minute >= hm(REMIND_AT):
         out.append(("ℹ️ Market closes at 15:30. I am still tracking: %s. Close intraday trades yourself; I keep watching the rest until you press Out." %
                     ", ".join(sorted(holdings)), None))
         st["reminded"] = True
-    if minute >= hm("15:30") and not st.get("summary"):
+    if env("DAILY_SUMMARY", "0") == "1" and minute >= hm("15:30") and not st.get("summary"):
         out.append(("✅ Scan summary %s: %d stocks scanned, %d problem(s)." % (today, scanned, len(errors)), None))
         st["summary"] = True
     if stopped:
@@ -571,10 +593,10 @@ def cmd_check(token, now):
         d = max(days)
         print("Latest day %s: first candle starts %s, last candle starts %s, %d candles (a full day has 25: 09:15 to 15:15)" % (
             d, days[d][0], days[d][-1], len(days[d])))
-    b45, b60 = aggregate(c15, 45), aggregate(c15, 60)
+    b45, b60 = b45_bars(c15), aggregate(c15, 60)
     print("45m candles: %d | 1h candles: %d" % (len(b45), len(b60)))
     if len(b45) >= MIN_BARS:
-        t45, s45 = FD.tsi_series([b["c"] for b in b45])
+        t45, s45 = FD.tsi_series(src45(b45))
         print("--- every 45m candle of the last days: close, TSI, signal (compare with TradingView) ---")
         for k in range(max(0, len(b45) - 32), len(b45)):
             print("%s %s-%s  close %.2f  TSI %.4f  signal %.4f" % (datetime.fromtimestamp(b45[k]["t"], IST).strftime("%d %b"),
@@ -583,9 +605,9 @@ def cmd_check(token, now):
     tv_diag(c15)
     rs = readings(c15)
     for rd in rs[-6:]:
-        print("1h %s-%s reads 45m %s-%s (known %s): TSI %.2f signal %.2f diff %+.2f" % (
+        print("1h %s-%s closes -> newest finished 45m candle %s-%s: TSI %.2f signal %.2f diff %+.2f" % (
             fmt_time(rd["h"]["t"]), fmt_time(rd["h"]["end"]), fmt_time(rd["b"]["t"]), fmt_time(rd["b"]["end"]),
-            fmt_time(rd["b"]["end"]), rd["tsi"], rd["sig"], rd["diff"]))
+            rd["tsi"], rd["sig"], rd["diff"]))
     for d, rd in crossovers(rs)[-3:]:
         print("Recent crossover: %s on 1h candle %s %s-%s" % ("BULLISH" if d == 1 else "BEARISH",
                                                             datetime.fromtimestamp(rd["h"]["t"], IST).date(), fmt_time(rd["h"]["t"]), fmt_time(rd["h"]["end"])))
