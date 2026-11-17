@@ -539,17 +539,18 @@ def tv_diag(c15):
         for sname, f in srcs.items():
             if sname != "close" and not name.startswith(("45m", "60m")):
                 continue
-            if "merged" in name:
-                idx = [k for k, b in enumerate(bars) if b["t"] < te <= b["end"]]        # the candle that contains that moment
-            else:
-                idx = [k for k, b in enumerate(bars) if b["end"] == te]
-            if not idx or len(bars) < 60:
+            if len(bars) < 60:
                 continue
             t, sg = FD.tsi_series([f(b) for b in bars])
-            rows.append((abs(t[idx[0]] - want_t) + abs(sg[idx[0]] - want_s), name, sname, t[idx[0]], sg[idx[0]]))
-    print("--- which setup gives TradingView's TSI %.4f / signal %.4f at %s? (closest first) ---" % (want_t, want_s, target_end.strftime("%d %b %H:%M")))
-    for dist, name, sname, t, sg in sorted(rows)[:12]:
-        print("%-28s source %-6s TSI %9.4f  signal %9.4f   gap %.3f" % (name, sname, t, sg, dist))
+            cand = [(abs(t[k] - want_t) + abs(sg[k] - want_s), k) for k, b in enumerate(bars)
+                    if datetime.fromtimestamp(b["t"], IST).date() == target_end.date()]
+            if not cand:
+                continue
+            dist, k = min(cand)
+            rows.append((dist, name, sname, t[k], sg[k], "%s-%s" % (fmt_time(bars[k]["t"]), fmt_time(bars[k]["end"]))))
+    print("--- which setup and candle give TradingView's TSI %.4f / signal %.4f on %s? (closest first) ---" % (want_t, want_s, target_end.strftime("%d %b")))
+    for dist, name, sname, t, sg, when in sorted(rows)[:12]:
+        print("%-22s %-5s candle %-11s TSI %8.4f  signal %8.4f  gap %.3f" % (name[:22], sname, when, t, sg, dist))
     print("--- end of search ---")
 
 
