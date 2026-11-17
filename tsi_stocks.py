@@ -524,13 +524,25 @@ def tv_diag(c15):
         full = aggregate(c15, n)
         sets["%dm" % n] = full
         sets["%dm no short last candle" % n] = [b for b in full if b["end_m"] - b["start_m"] == n]
+    for n in (45, 60):                                           # the short closing candle folded into the day's last full candle
+        merged = []
+        for b in aggregate(c15, n):
+            if merged and merged[-1]["date"] == b["date"] and b["end_m"] - b["start_m"] < n:
+                m = merged[-1]
+                m.update({"end": b["end"], "end_m": b["end_m"], "h": max(m["h"], b["h"]), "l": min(m["l"], b["l"]), "c": b["c"]})
+            else:
+                merged.append(dict(b))
+        sets["%dm closing candle merged into the last one" % n] = merged
     sets["15m"] = [{"t": t, "end": t + 900, "o": o, "h": h, "l": l, "c": c, "start_m": 0, "end_m": 15} for (t, o, h, l, c) in c15]
     rows = []
     for name, bars in sets.items():
         for sname, f in srcs.items():
             if sname != "close" and not name.startswith(("45m", "60m")):
                 continue
-            idx = [k for k, b in enumerate(bars) if b["end"] == te]
+            if "merged" in name:
+                idx = [k for k, b in enumerate(bars) if b["t"] < te <= b["end"]]        # the candle that contains that moment
+            else:
+                idx = [k for k, b in enumerate(bars) if b["end"] == te]
             if not idx or len(bars) < 60:
                 continue
             t, sg = FD.tsi_series([f(b) for b in bars])
