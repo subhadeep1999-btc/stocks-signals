@@ -530,6 +530,13 @@ def cmd_check(token, now):
             d, days[d][0], days[d][-1], len(days[d])))
     b45, b60 = aggregate(c15, 45), aggregate(c15, 60)
     print("45m candles: %d | 1h candles: %d" % (len(b45), len(b60)))
+    if len(b45) >= MIN_BARS:
+        t45, s45 = FD.tsi_series([b["c"] for b in b45])
+        print("--- every 45m candle of the last days: close, TSI, signal (compare with TradingView) ---")
+        for k in range(max(0, len(b45) - 32), len(b45)):
+            print("%s %s-%s  close %.2f  TSI %.4f  signal %.4f" % (datetime.fromtimestamp(b45[k]["t"], IST).strftime("%d %b"),
+                  fmt_time(b45[k]["t"]), fmt_time(b45[k]["end"]), b45[k]["c"], t45[k], s45[k]))
+        print("--- end of table; %d 45m candles were used for the calculation ---" % len(b45))
     rs = readings(c15)
     for rd in rs[-6:]:
         print("1h %s-%s reads 45m %s-%s (known %s): TSI %.2f signal %.2f diff %+.2f" % (
