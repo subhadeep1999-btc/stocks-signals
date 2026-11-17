@@ -511,6 +511,36 @@ def scan(token, st, now):
 
 
 # ----------------------------------- commands -----------------------------------
+def tv_diag(c15):
+    """Find out which way of building the candles / source reproduces TradingView's number (default: ADANIPOWER, 1h candle
+    14:15-15:15 on 16 Nov 2026 shows TSI -2.5311, signal 5.1983)."""
+    target_end = datetime.strptime(env("TV_END", "2026-11-16 15:15"), "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+    want_t, want_s = float(env("TV_TSI", "-2.5311")), float(env("TV_SIG", "5.1983"))
+    te = int(target_end.timestamp())
+    srcs = {"close": lambda b: b["c"], "open": lambda b: b["o"], "hl2": lambda b: (b["h"] + b["l"]) / 2,
+            "hlc3": lambda b: (b["h"] + b["l"] + b["c"]) / 3, "ohlc4": lambda b: (b["o"] + b["h"] + b["l"] + b["c"]) / 4}
+    sets = {}
+    for n in (15, 30, 45, 60, 120):
+        full = aggregate(c15, n)
+        sets["%dm" % n] = full
+        sets["%dm no short last candle" % n] = [b for b in full if b["end_m"] - b["start_m"] == n]
+    sets["15m"] = [{"t": t, "end": t + 900, "o": o, "h": h, "l": l, "c": c, "start_m": 0, "end_m": 15} for (t, o, h, l, c) in c15]
+    rows = []
+    for name, bars in sets.items():
+        for sname, f in srcs.items():
+            if sname != "close" and not name.startswith(("45m", "60m")):
+                continue
+            idx = [k for k, b in enumerate(bars) if b["end"] == te]
+            if not idx or len(bars) < 60:
+                continue
+            t, sg = FD.tsi_series([f(b) for b in bars])
+            rows.append((abs(t[idx[0]] - want_t) + abs(sg[idx[0]] - want_s), name, sname, t[idx[0]], sg[idx[0]]))
+    print("--- which setup gives TradingView's TSI %.4f / signal %.4f at %s? (closest first) ---" % (want_t, want_s, target_end.strftime("%d %b %H:%M")))
+    for dist, name, sname, t, sg in sorted(rows)[:12]:
+        print("%-28s source %-6s TSI %9.4f  signal %9.4f   gap %.3f" % (name, sname, t, sg, dist))
+    print("--- end of search ---")
+
+
 def cmd_check(token, now):
     sym = FD.short(FD.symbols()[0])
     candles = FD.history(token, fyers_symbol(sym), resolution="15", days=HIST_DAYS)
@@ -537,6 +567,7 @@ def cmd_check(token, now):
             print("%s %s-%s  close %.2f  TSI %.4f  signal %.4f" % (datetime.fromtimestamp(b45[k]["t"], IST).strftime("%d %b"),
                   fmt_time(b45[k]["t"]), fmt_time(b45[k]["end"]), b45[k]["c"], t45[k], s45[k]))
         print("--- end of table; %d 45m candles were used for the calculation ---" % len(b45))
+    tv_diag(c15)
     rs = readings(c15)
     for rd in rs[-6:]:
         print("1h %s-%s reads 45m %s-%s (known %s): TSI %.2f signal %.2f diff %+.2f" % (
