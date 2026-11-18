@@ -224,7 +224,10 @@ def send_buttons(text, rows):
     """Send a message with tappable buttons. rows = [[(label, callback_data), ...], ...]"""
     print(text, flush=True)
     payload = {"chat_id": TG_CHAT_ID, "text": text[:3900],
-               "reply_markup": {"inline_keyboard": [[{"text": a, "callback_data": b} for a, b in row] for row in rows]}}
+               # a keyboard under the message: tapping a key SENDS its text as a normal message from you ("I bought XYZ");
+               # the bot reads that message the next time it runs
+               "reply_markup": {"keyboard": [[{"text": re.sub(r"^[^\w]+", "", a)} for a, b in row] for row in rows],
+                                "resize_keyboard": True, "one_time_keyboard": True}}
     try:
         r = requests.post("https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN, json=payload, timeout=20)
         if not r.json().get("ok"):
@@ -236,7 +239,7 @@ def send_buttons(text, rows):
 
 
 def out_buttons(sym):
-    return [[("✅ I am out of %s" % sym, "out:" + sym), ("🔄 Still holding", "hold:" + sym)]]
+    return [[("✅ I am out of %s" % sym, "out:" + sym), ("🔄 Still holding %s" % sym, "hold:" + sym)]]
 
 
 # ----------------------------------- telegram: what you send -----------------------------------
@@ -303,7 +306,7 @@ def poll_commands(st, now_ts):
         m = u.get("message") or {}
         if str((m.get("chat") or {}).get("id")) != str(TG_CHAT_ID):
             continue
-        text = (m.get("text") or "").strip()
+        text = re.sub(r"^[^\w/]+", "", (m.get("text") or "").strip())          # drop a leading emoji
         when = int(m.get("date") or now_ts)
         low = text.lower()
         if looks_like_code(text):
@@ -313,12 +316,15 @@ def poll_commands(st, now_ts):
             except FD.FyersError as e:
                 replies.append(("❌ That code did not work (%s)." % e, None))
             continue
-        mo = re.match(r"^/?(out|sell|sold|exit|close)(?:@\w+)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)
-        mi = re.match(r"^/?(in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)   # the old long form still works
+        mo = re.match(r"^/?(?:i\s+(?:am\s+)?)?(?:out|sell|sold|exit|close)(?:@\w+)?(?:\s+of)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)
+        mi = re.match(r"^/?(?:i\s+)?(?:in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)
+        mh = re.match(r"^still\s+holding\s+([A-Za-z0-9&\-\.:]+)\s*$", text, re.I)
         if mo:
-            untrack(norm(mo.group(2)))
+            untrack(norm(mo.group(1)))
         elif mi:
-            track(norm(mi.group(2)), when)
+            track(norm(mi.group(1)), when)
+        elif mh:
+            replies.append(("🔄 OK, still holding %s - I keep watching and will warn you on the next bearish crossover." % norm(mh.group(1)), None))
         elif low in ("list", "/list", "status", "/status"):
             if holdings:
                 replies.append(("Tracking your position(s):\n" + "\n".join("%s%s" % (s, " from %s at about %.2f" % (h["entry_label"], h["entry_price"])
@@ -408,23 +414,29 @@ def wait_for_candle(token, sym, now):
         waited += 8
 
 
-def scan(token, st, now):
+def scan(token, st, now, poll_only=False):
+    """poll_only: just read your Telegram taps/messages and start tracking a stock you just bought; no alerts, no morning note."""
     now_ts = int(now.timestamp())
     today = now.strftime("%Y-%m-%d")
     minute = now.hour * 60 + now.minute
     holdings = st.setdefault("holdings", {})
     out = []                                                     # [(text, buttons)]
 
-    morning = st.get("day") != today                             # first run of a new day
+    morning = (not poll_only) and st.get("day") != today                             # first run of a new day
     if morning:
         st.update(day=today, reminded=False, summary=False)
 
     out += poll_commands(st, now_ts)
 
     # before the first reading of the day (10:45) nothing new can exist: only look at your positions
-    syms = sorted(set(holdings)) if minute < hm("10:10") else sorted(set(FD.short(s) for s in FD.symbols()) | set(holdings))
+    if poll_only:
+        syms = sorted(s for s, h_ in holdings.items() if not h_.get("entry_ts"))
+    elif minute < hm("10:10"):
+        syms = sorted(set(holdings))
+    else:
+        syms = sorted(set(FD.short(s) for s in FD.symbols()) | set(holdings))
     watermarks = st.setdefault("watermark", {})
-    if syms:
+    if syms and not poll_only:
         wait_for_candle(token, syms[0], now)
     buys, emas, exits, errors, scanned, stopped = [], [], [], [], 0, None
     seen = {}
@@ -451,7 +463,8 @@ def scan(token, st, now):
         es = ema_signals(c15)
         seen[sym] = (c15, rs, es)
         mark = watermarks.get(sym)
-        watermarks[sym] = min(now_ts, c15[-1][0] + 900)         # never move past data FYERS has not published yet
+        if not poll_only:
+            watermarks[sym] = min(now_ts, c15[-1][0] + 900)     # never move past data FYERS has not published yet
         h = holdings.get(sym)
         if h is not None and not h.get("entry_ts"):             # a stock you just told me about: find its bullish crossover
             h["entry_ts"], h["entry_price"], h["entry_label"], warn = entry_from(rs, c15, es)
@@ -459,7 +472,7 @@ def scan(token, st, now):
             out.append(("✅ Tracking %s from its latest bullish signal (%s, about %.2f). Now about %.2f (%+.2f%%).%s\n"
                         "I will send its performance every morning and warn you when the 1h TSI turns bearish or the EMA alerts fire." % (
                             sym, h["entry_label"], h["entry_price"], px, (px / h["entry_price"] - 1) * 100, warn), out_buttons(sym)))
-        if mark is None:
+        if poll_only or mark is None:
             continue                                            # first time we see this stock: start from now, no old alerts
         for d, rd in crossovers(rs):
             known = rd["known"]
@@ -505,7 +518,7 @@ def scan(token, st, now):
             if sym in seen_b:
                 continue
             seen_b.add(sym)
-            rows_.append([("✅ I am out of %s" % sym, "out:" + sym), ("🔄 Still holding", "hold:" + sym)] if sym in holdings
+            rows_.append([("✅ I am out of %s" % sym, "out:" + sym), ("🔄 Still holding %s" % sym, "hold:" + sym)] if sym in holdings
                          else [("📌 I bought %s" % sym, "in:" + sym)])
         foot = "\n\nIf you buy, press the button (or just send me the stock name)." if any(r[0][1].startswith("in:") for r in rows_) else \
             "\n\nPress I am out when you have sold, or Still holding to keep watching."
@@ -771,10 +784,12 @@ def main():
                 return
         if "--check" in sys.argv:
             cmd_check(token, now)
+        elif "--poll" in sys.argv:
+            scan(token, st, now, poll_only=True)
         elif "--scan" in sys.argv:
             scan(token, st, now)
         else:
-            raise SystemExit("Use --login-link, --login, --refresh, --check or --scan.")
+            raise SystemExit("Use --login-link, --login, --refresh, --check, --poll or --scan.")
     finally:
         save_state(st)
 
