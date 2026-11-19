@@ -314,7 +314,8 @@ def poll_commands(st, now_ts):
             try:
                 cmd_login(text, datetime.now(IST))
             except FD.FyersError as e:
-                replies.append(("❌ That code did not work (%s)." % e, None))
+                replies.append(("❌ That code did not work (%s). I will send a fresh link." % e, None))
+                st["login_prompt_ts"] = 0
             continue
         mo = re.match(r"^/?(?:i\s+(?:am\s+)?)?(?:out|sell|sold|exit|close)(?:@\w+)?(?:\s+of)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)
         mi = re.match(r"^/?(?:i\s+)?(?:in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)
@@ -649,11 +650,13 @@ def tg_delete(message_id):
         pass
 
 
-def login_prompt(minutes):
+def login_prompt(minutes=None):
+    tail = ("I am listening for %d minutes." % minutes) if minutes else \
+           "You can do this ANY time from 6:30 to 15:15. I read your message at my next check (every few minutes while the poll job runs); " \
+           "if the code has expired by then I send you a fresh link."
     send("🔑 FYERS login needed today.\n\n1) Press and hold this link, choose Copy, open it in Chrome and log in:\n%s\n\n"
          "2) You land on a page showing the authorisation code. Press and hold the long code, select all, copy it.\n"
-         "3) SEND THE CODE TO ME HERE in this chat. Do it quickly - the code lives only a minute or two.\n\n"
-         "I am listening for %d minutes." % (FD.login_link(), minutes))
+         "3) SEND THE CODE TO ME HERE in this chat.\n\n%s" % (FD.login_link(), tail))
 
 
 def wait_for_login(st, now, minutes):
@@ -749,6 +752,59 @@ def telegram_login(st, now, minutes, why=""):
     return wait_for_login(st, now, minutes)
 
 
+def morning_report(token, st, now):
+    """Once a day, right after the login: for every stock, is the 1h TSI bullish or bearish, and when was the last BULLISH crossover."""
+    today = now.strftime("%Y-%m-%d")
+    if st.get("report_day") == today:
+        return
+    now_ts = int(now.timestamp())
+    holdings = st.get("holdings", {})
+    syms = sorted(set(FD.short(s) for s in FD.symbols()) | set(holdings))
+    bull, bear, errors, stopped = [], [], [], False
+    for n, sym in enumerate(syms):
+        if n:
+            time.sleep(FD.PACE_SECONDS)
+        try:
+            candles = FD.history(token, fyers_symbol(sym), resolution="15", days=HIST_DAYS)
+        except FD.RateLimited:
+            errors.append("stopped early: FYERS rate limit")
+            stopped = True
+            break
+        except FD.FyersError as e:
+            errors.append("%s: %s" % (sym, e))
+            continue
+        rs = readings(completed_15m(candles, now_ts))
+        if not rs:
+            errors.append("%s: not enough candles" % sym)
+            continue
+        ev = crossovers(rs)
+        ups = [r for d, r in ev if d == 1]
+        last_up = ("last bullish crossover %s" % fmt_when(ups[-1]["known"])) if ups else "no bullish crossover in the last %d days" % HIST_DAYS
+        last = rs[-1]
+        mark = " (you are tracking)" if sym in holdings else ""
+        if last["diff"] > 0:
+            bull.append("%s  BULLISH%s - %s | TSI %.1f vs signal %.1f" % (sym, mark, last_up, last["tsi"], last["sig"]))
+        else:
+            downs = [r for d, r in ev if d == -1]
+            since = " since %s" % fmt_when(downs[-1]["known"]) if downs else ""
+            bear.append("%s  bearish%s%s | %s" % (sym, mark, since, last_up))
+    text = "📋 TSI status for your stocks - %s (1h chart, TSI 25/13/13 on 45m; times are the 1h candle close)\n" % now.strftime("%d %b %Y")
+    if bull:
+        text += "\n🟢 Bullish now (%d):\n%s\n" % (len(bull), "\n".join(bull))
+    if bear:
+        text += "\n🔴 Bearish now (%d):\n%s\n" % (len(bear), "\n".join(bear))
+    if errors:
+        text += "\n⚠️ %s" % "; ".join(errors[:5])
+    send(text)
+    if not stopped:
+        st["report_day"] = today
+
+
+def deliver(replies):
+    for text, buttons in replies:
+        send_buttons(text, buttons) if buttons else send(text)
+
+
 def main():
     now = datetime.now(IST)
     today = now.strftime("%Y-%m-%d")
@@ -768,20 +824,30 @@ def main():
             if load_token(today, now) is None:
                 why = try_refresh(now)
                 if why:
-                    telegram_login(st, now, LOGIN_WAIT_MIN, why)
+                    login_prompt()
+                    st["login_prompt_ts"] = int(now.timestamp())
+            tok = load_token(today, now)
+            if tok:
+                morning_report(tok, st, now)
             return
         token = load_token(today, now)
         if not token:
-            if st.get("login_alert") == today:
-                print("No FYERS token for today.")
-                return
-            st["login_alert"] = today
-            why = try_refresh(now)                               # last chance to log in by itself
-            if why and not telegram_login(st, now, SCAN_LOGIN_WAIT_MIN, why):
-                return
+            minute = now.hour * 60 + now.minute
+            deliver(poll_commands(st, int(now.timestamp())))     # a code you sent is turned into a login right here
             token = load_token(today, now)
+            if not token and hm("06:30") <= minute <= hm("15:15"):
+                if st.get("refresh_day") != today:
+                    st["refresh_day"] = today
+                    try_refresh(now)                              # automatic login first, if a PIN is set
+                    token = load_token(today, now)
+                if not token and int(now.timestamp()) - st.get("login_prompt_ts", 0) >= 3600:
+                    st["login_prompt_ts"] = int(now.timestamp())
+                    login_prompt()
             if not token:
+                print("No FYERS token yet.")
                 return
+        if "--check" not in sys.argv:
+            morning_report(token, st, now)
         if "--check" in sys.argv:
             cmd_check(token, now)
         elif "--poll" in sys.argv:
