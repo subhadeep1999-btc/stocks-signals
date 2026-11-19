@@ -25,6 +25,7 @@ Commands (GitHub workflow "tsi-stocks"):  --login-link | --login | --refresh | -
 The FYERS token (valid until 6:30 AM next day) is kept in the GitHub Actions cache by the workflow, never in the repo.
 """
 import bisect
+import difflib
 import json
 import os
 import re
@@ -246,11 +247,35 @@ def out_buttons(sym):
 WORDS = {"list", "/list", "status", "/status", "help", "/help", "/start", "start", "hi", "hello", "ok", "thanks"}
 
 
+ALIASES = {"POLICYBAZAAR": "POLICYBZR", "COCHINSHIPYARD": "COCHINSHIP", "GARDENREACH": "GRSE", "MAHANAGARGAS": "MGL",
+           "TUBEINVESTMENTS": "TIINDIA", "TATACONSUMER": "TATACONSUM", "AUROBINDOPHARMA": "AUROPHARMA", "AUROBINDO": "AUROPHARMA",
+           "PIDILITE": "PIDILITIND", "PIDILITEINDUSTRIES": "PIDILITIND", "DEEPAKNITRITE": "DEEPAKNTR", "DEEPAKFERTILIZER": "DEEPAKFERT",
+           "DEEPAKFERTILIZERS": "DEEPAKFERT", "ADANIENTERPRISES": "ADANIENT", "ADANIENERGYSOLUTIONS": "ADANIENSOL",
+           "SUNPHARMACEUTICAL": "SUNPHARMA", "SUNPHARMACEUTICALS": "SUNPHARMA", "ESCORTSKUBOTA": "ESCORTS", "VOLTASLIMITED": "VOLTAS"}
+
+
+def known_symbols():
+    try:
+        return [FD.short(s) for s in FD.symbols()]
+    except Exception:
+        return []
+
+
 def norm(sym):
+    """Turns what you typed into the NSE symbol: spaces and small spelling slips are forgiven for your 25 stocks
+    ("sun pharma", "Sun Pharama" -> SUNPHARMA). Other names are passed on as typed (FYERS says if it does not know them)."""
     sym = sym.strip().upper()
     if sym.startswith("NSE:"):
         sym = sym[4:]
-    return sym[:-3] if sym.endswith("-EQ") else sym
+    sym = sym[:-3] if sym.endswith("-EQ") else sym
+    sym = re.sub(r"[^A-Z0-9&\-]", "", sym)
+    sym = ALIASES.get(sym, sym)
+    known = known_symbols()
+    if sym not in known:
+        close = difflib.get_close_matches(sym, known, n=1, cutoff=0.86)
+        if close:
+            sym = close[0]
+    return sym
 
 
 def fyers_symbol(sym):
@@ -317,9 +342,9 @@ def poll_commands(st, now_ts):
                 replies.append(("❌ That code did not work (%s). I will send a fresh link." % e, None))
                 st["login_prompt_ts"] = 0
             continue
-        mo = re.match(r"^/?(?:i\s+(?:am\s+)?)?(?:out|sell|sold|exit|close)(?:@\w+)?(?:\s+of)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)
-        mi = re.match(r"^/?(?:i\s+)?(?:in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.:]+)(?:\s+[0-9.]+)?\s*$", text, re.I)
-        mh = re.match(r"^still\s+holding\s+([A-Za-z0-9&\-\.:]+)\s*$", text, re.I)
+        mo = re.match(r"^/?(?:i\s+(?:am\s+)?)?(?:out|sell|sold|exit|close)(?:@\w+)?(?:\s+of)?\s+([A-Za-z0-9&\-\.: ]+?)(?:\s+[0-9.]+)?\s*$", text, re.I)
+        mi = re.match(r"^/?(?:i\s+)?(?:in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.: ]+?)(?:\s+[0-9.]+)?\s*$", text, re.I)
+        mh = re.match(r"^still\s+holding\s+([A-Za-z0-9&\-\.: ]+?)\s*$", text, re.I)
         if mo:
             untrack(norm(mo.group(1)))
         elif mi:
@@ -336,7 +361,7 @@ def poll_commands(st, now_ts):
             replies.append(("Just send me the stock name when you buy, for example: RELIANCE\nI track it from its latest bullish signal, "
                             "send you its performance every morning, and warn you when the 1h TSI turns bearish.\n"
                             "Other messages: list | out RELIANCE", None))
-        elif re.match(r"^[A-Za-z0-9&\-\.]{1,20}$", text):
+        elif re.match(r"^[A-Za-z0-9&\-\. ]{1,30}$", text):
             track(norm(text), when)
         elif text:
             replies.append(("I did not understand \"%s\". Send a stock name, for example: RELIANCE" % text[:40], None))
