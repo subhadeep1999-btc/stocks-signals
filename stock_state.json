@@ -13,13 +13,19 @@
    "entry_price": 1416.8,
    "entry_ts": 1795067100,
    "since": 1795063587
+  },
+  "SUNPHARMA": {
+   "entry_ts": null,
+   "since": 1795089785
   }
  },
  "login_alert": "2026-11-19",
+ "login_prompt_ts": 1795144826,
+ "refresh_day": "2026-11-20",
  "reminded": false,
  "report_day": "2026-11-19",
  "summary": false,
- "tg_offset": 758828016,
+ "tg_offset": 758828018,
  "watermark": {
   "ADANIENSOL": 1795081500,
   "ADANIENT": 1795081500,
