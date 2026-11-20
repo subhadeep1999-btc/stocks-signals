@@ -842,8 +842,9 @@ def main():
         return
     st = load_state()
     try:
-        if "--login-link" in sys.argv:
-            telegram_login(st, now, LOGIN_WAIT_MIN)
+        if "--login-link" in sys.argv:                           # just send the link; a later poll/scan run reads your code
+            login_prompt()
+            st["login_prompt_ts"] = int(now.timestamp())
             return
         if "--refresh" in sys.argv:
             if load_token(today, now) is None:
