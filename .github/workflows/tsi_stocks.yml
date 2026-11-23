@@ -4,15 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       cmd:
-        description: "scan = normal run | refresh = automatic morning login | login-link = send me the login link on Telegram | login = (old way) save the code typed below | check = test one stock"
+        description: "scan | poll | refresh | login-link | check  (poll = only read my Telegram messages and login code; refresh = automatic login or send me the login link; login-link = send me the login link)"
         default: "scan"
-        type: choice
-        options:
-          - scan
-          - refresh
-          - login-link
-          - login
-          - check
+        type: string
       auth_code:
         description: "Only for cmd = login: paste the WHOLE address of the page you land on after FYERS login"
         required: false
@@ -60,7 +54,8 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           FYERS_PIN: ${{ secrets.FYERS_PIN }}
           AUTH_CODE: ${{ inputs.auth_code }}
-        run: python tsi_stocks.py --${{ inputs.cmd || 'scan' }}
+          CMD: ${{ inputs.cmd }}
+        run: python tsi_stocks.py --$(echo "${CMD:-scan}" | tr 'A-Z ' 'a-z-')
 
       - name: Keep today's FYERS login for the next runs
         if: ${{ hashFiles('.token/new') != '' }}
