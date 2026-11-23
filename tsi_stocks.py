@@ -677,14 +677,14 @@ def tg_delete(message_id):
 
 def login_prompt(minutes=None):
     tail = ("I am listening for %d minutes." % minutes) if minutes else \
-           "You can do this ANY time from 6:30 to 15:15. I read your message at my next check (every few minutes while the poll job runs); " \
+           "You can do this ANY time until 15:15. I read your message at my next check (every few minutes while the poll job runs); " \
            "if the code has expired by then I send you a fresh link."
     send("🔑 FYERS login needed today.\n\n1) Press and hold this link, choose Copy, open it in Chrome and log in:\n%s\n\n"
          "2) You land on a page showing the authorisation code. Press and hold the long code, select all, copy it.\n"
          "3) SEND THE CODE TO ME HERE in this chat.\n\n%s" % (FD.login_link(), tail))
 
 
-def wait_for_login(st, now, minutes):
+def wait_for_login(st, now, minutes, quiet=False):
     """Listen on Telegram for the code you send. Returns True when the login worked."""
     deadline = time.time() + minutes * 60
     while time.time() < deadline:
@@ -711,7 +711,8 @@ def wait_for_login(st, now, minutes):
             except FD.FyersError as e:
                 send("❌ That code did not work (%s). Tap the link again and send me a fresh code." % e)
         time.sleep(2)
-    send("⏰ I did not get a login code in %d minutes. Run login-link in GitHub or wait for the next prompt." % minutes)
+    if not quiet:
+        send("⏰ I did not get a login code in %d minutes. Run login-link in GitHub or wait for the next prompt." % minutes)
     return False
 
 
@@ -838,6 +839,9 @@ def main():
     except OSError:
         pass
     if "--login" in sys.argv:
+        if not env("AUTH_CODE"):                                 # "login" without a code: just send the login link
+            login_prompt()
+            return
         cmd_login(env("AUTH_CODE"), now)
         return
     st = load_state()
@@ -861,7 +865,7 @@ def main():
             minute = now.hour * 60 + now.minute
             deliver(poll_commands(st, int(now.timestamp())))     # a code you sent is turned into a login right here
             token = load_token(today, now)
-            if not token and hm("06:30") <= minute <= hm("15:15"):
+            if not token and hm(env("LOGIN_FROM_IST", "08:00")) <= minute <= hm("15:15"):
                 if st.get("refresh_day") != today:
                     st["refresh_day"] = today
                     try_refresh(now)                              # automatic login first, if a PIN is set
@@ -869,6 +873,9 @@ def main():
                 if not token and int(now.timestamp()) - st.get("login_prompt_ts", 0) >= 3600:
                     st["login_prompt_ts"] = int(now.timestamp())
                     login_prompt()
+                    # stay a few minutes so a code sent right away is used while it is still fresh; later codes are read by the next runs
+                    if wait_for_login(st, now, int(env("LOGIN_LISTEN_MIN", "4")), quiet=True):
+                        token = load_token(today, now)
             if not token:
                 print("No FYERS token yet.")
                 return
