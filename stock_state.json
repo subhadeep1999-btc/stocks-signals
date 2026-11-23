@@ -6,7 +6,7 @@
    "sym": "ADANIPORTS"
   }
  ],
- "day": "2026-11-20",
+ "day": "2026-11-23",
  "holdings": {
   "ADANIGREEN": {
    "entry_label": "bullish TSI crossover, 19 Nov 11:15",
@@ -27,11 +27,11 @@
  "reminded": false,
  "report_day": "2026-11-23",
  "summary": false,
- "tg_offset": 758828020,
+ "tg_offset": 758828022,
  "watermark": {
   "ADANIENSOL": 1795167900,
   "ADANIENT": 1795167900,
-  "ADANIGREEN": 1795167900,
+  "ADANIGREEN": 1795168800,
   "ADANIPORTS": 1795167900,
   "ADANIPOWER": 1795167900,
   "ASTRAL": 1795167900,
@@ -49,7 +49,7 @@
   "POLICYBZR": 1795167900,
   "RELIANCE": 1795167900,
   "SRF": 1795167900,
-  "SUNPHARMA": 1795167900,
+  "SUNPHARMA": 1795168800,
   "TATACONSUM": 1795167900,
   "TATAPOWER": 1795167900,
   "TIINDIA": 1795167900,
