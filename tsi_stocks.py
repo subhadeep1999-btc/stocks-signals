@@ -335,12 +335,7 @@ def poll_commands(st, now_ts):
         when = int(m.get("date") or now_ts)
         low = text.lower()
         if looks_like_code(text):
-            tg_delete(m.get("message_id"))
-            try:
-                cmd_login(text, datetime.now(IST))
-            except FD.FyersError as e:
-                replies.append(("❌ That code did not work (%s). I will send a fresh link." % e, None))
-                st["login_prompt_ts"] = 0
+            try_code(st, m.get("message_id"), text)
             continue
         mo = re.match(r"^/?(?:i\s+(?:am\s+)?)?(?:out|sell|sold|exit|close)(?:@\w+)?(?:\s+of)?\s+([A-Za-z0-9&\-\.: ]+?)(?:\s+[0-9.]+)?\s*$", text, re.I)
         mi = re.match(r"^/?(?:i\s+)?(?:in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.: ]+?)(?:\s+[0-9.]+)?\s*$", text, re.I)
@@ -663,9 +658,37 @@ def cmd_check(token, now):
     print("Check finished: no orders exist in this program.")
 
 
-def looks_like_code(text):
+def find_code(text):
+    """The FYERS authorisation code inside what you sent: a whole page address, the code alone, or the code with words around it."""
     t = (text or "").strip()
-    return "auth_code=" in t or (len(t) >= 80 and " " not in t)
+    m = re.search(r"auth_code=([^&\s]+)", t)
+    if m:
+        return m.group(1)
+    m = re.search(r"eyJ[\w\-\.]{40,}", t)                      # FYERS codes are long and start with eyJ
+    if m:
+        return m.group(0)
+    if len(t) >= 80 and " " not in t:
+        return t
+    return None
+
+
+def looks_like_code(text):
+    return find_code(text) is not None
+
+
+def try_code(st, message_id, text):
+    """You pasted a code: say so at once, try the login, and ALWAYS tell you how it went. True when the login worked."""
+    tg_delete(message_id)
+    send("🔑 Code received - logging in to FYERS...")
+    try:
+        cmd_login(find_code(text), datetime.now(IST))
+        return True
+    except FD.FyersError as e:
+        send("❌ That code did not work (%s). Tap the login link again and send me the new code quickly - codes expire fast." % e)
+    except (Exception, SystemExit) as e:
+        send("❌ Login problem: %s" % (str(e)[:250] or type(e).__name__))
+    st["login_prompt_ts"] = 0
+    return False
 
 
 def tg_delete(message_id):
@@ -676,7 +699,7 @@ def tg_delete(message_id):
 
 
 def login_prompt(minutes=None):
-    tail = ("I am listening for %d minutes." % minutes) if minutes else \
+    tail = ("I am listening for the next %d minutes, so send the code as soon as you have it. After that I read it at my next check." % minutes) if minutes else \
            "You can do this ANY time until 15:15. I read your message at my next check (every few minutes while the poll job runs); " \
            "if the code has expired by then I send you a fresh link."
     send("🔑 FYERS login needed today.\n\n1) Press and hold this link, choose Copy, open it in Chrome and log in:\n%s\n\n"
@@ -704,12 +727,8 @@ def wait_for_login(st, now, minutes, quiet=False):
             if not looks_like_code(text):
                 continue                                         # keep other messages for the normal scan
             st["tg_offset"] = u["update_id"] + 1
-            tg_delete(m.get("message_id"))
-            try:
-                cmd_login(text, datetime.now(IST))
+            if try_code(st, m.get("message_id"), text):
                 return True
-            except FD.FyersError as e:
-                send("❌ That code did not work (%s). Tap the link again and send me a fresh code." % e)
         time.sleep(2)
     if not quiet:
         send("⏰ I did not get a login code in %d minutes. Run login-link in GitHub or wait for the next prompt." % minutes)
@@ -872,15 +891,18 @@ def main():
                     token = load_token(today, now)
                 if not token and int(now.timestamp()) - st.get("login_prompt_ts", 0) >= 3600:
                     st["login_prompt_ts"] = int(now.timestamp())
-                    login_prompt()
+                    login_prompt(int(env("LOGIN_LISTEN_MIN", "8")))
                     # stay a few minutes so a code sent right away is used while it is still fresh; later codes are read by the next runs
-                    if wait_for_login(st, now, int(env("LOGIN_LISTEN_MIN", "4")), quiet=True):
+                    if wait_for_login(st, now, int(env("LOGIN_LISTEN_MIN", "8")), quiet=True):
                         token = load_token(today, now)
             if not token:
                 print("No FYERS token yet.")
                 return
         if "--check" not in sys.argv:
-            morning_report(token, st, now)
+            try:
+                morning_report(token, st, now)
+            except Exception as e:                               # a problem here must never lose the login or stop the scan
+                send("⚠️ Could not build the morning status: %s" % str(e)[:200])
         if "--check" in sys.argv:
             cmd_check(token, now)
         elif "--poll" in sys.argv:
