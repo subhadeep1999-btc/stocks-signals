@@ -58,7 +58,7 @@ jobs:
         run: python tsi_stocks.py --$(echo "${CMD:-scan}" | tr 'A-Z ' 'a-z-')
 
       - name: Keep today's FYERS login for the next runs
-        if: ${{ hashFiles('.token/new') != '' }}
+        if: ${{ always() && hashFiles('.token/new') != '' }}
         uses: actions/cache/save@v4
         with:
           path: .token
