@@ -16,15 +16,15 @@
    "sym": "ADANIGREEN"
   }
  ],
- "day": "2026-11-23",
+ "day": "2026-11-24",
  "holdings": {},
  "login_alert": "2026-11-19",
  "login_prompt_ts": 1795488329,
  "refresh_day": "2026-11-20",
  "reminded": false,
- "report_day": "2026-11-23",
+ "report_day": "2026-11-24",
  "summary": false,
- "tg_offset": 758828028,
+ "tg_offset": 758828029,
  "watermark": {
   "ADANIENSOL": 1795427100,
   "ADANIENT": 1795427100,
