@@ -865,20 +865,17 @@ def main():
         return
     st = load_state()
     try:
-        if "--login-link" in sys.argv:                           # just send the link; a later poll/scan run reads your code
-            login_prompt()
-            st["login_prompt_ts"] = int(now.timestamp())
-            return
-        if "--refresh" in sys.argv:
+        if "--login-link" in sys.argv:                           # send the link and stay a few minutes for the code
             if load_token(today, now) is None:
-                why = try_refresh(now)
-                if why:
-                    login_prompt()
-                    st["login_prompt_ts"] = int(now.timestamp())
-            tok = load_token(today, now)
-            if tok:
-                morning_report(tok, st, now)
+                listen = int(env("LOGIN_LISTEN_MIN", "8"))
+                login_prompt(listen)
+                st["login_prompt_ts"] = int(now.timestamp())
+                wait_for_login(st, now, listen, quiet=True)
+            else:
+                send("✅ You are already logged in to FYERS for today.")
             return
+        if "--refresh" in sys.argv:                              # the morning job: automatic login, else the link, and it reads your code like a poll run
+            sys.argv.append("--poll")
         token = load_token(today, now)
         if not token:
             minute = now.hour * 60 + now.minute
