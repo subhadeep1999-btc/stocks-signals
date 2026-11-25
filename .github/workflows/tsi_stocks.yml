@@ -55,6 +55,8 @@ jobs:
           FYERS_PIN: ${{ secrets.FYERS_PIN }}
           AUTH_CODE: ${{ inputs.auth_code }}
           CMD: ${{ inputs.cmd }}
+          LOGIN_LISTEN_MIN: ${{ vars.LOGIN_LISTEN_MIN }}
+          LOGIN_FROM_IST: ${{ vars.LOGIN_FROM_IST }}
         run: python tsi_stocks.py --$(echo "${CMD:-scan}" | tr 'A-Z ' 'a-z-')
 
       - name: Keep today's FYERS login for the next runs
