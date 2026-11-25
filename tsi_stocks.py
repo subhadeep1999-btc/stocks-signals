@@ -24,6 +24,7 @@ TSI signals for Indian stocks on FYERS data (signals only - this program never p
 Commands (GitHub workflow "tsi-stocks"):  --login-link | --login | --refresh | --check | --scan
 The FYERS token (valid until 6:30 AM next day) is kept in the GitHub Actions cache by the workflow, never in the repo.
 """
+import base64
 import bisect
 import difflib
 import json
@@ -335,7 +336,7 @@ def poll_commands(st, now_ts):
         when = int(m.get("date") or now_ts)
         low = text.lower()
         if looks_like_code(text):
-            try_code(st, m.get("message_id"), text)
+            try_code(st, m.get("message_id"), text, m.get("date"))
             continue
         mo = re.match(r"^/?(?:i\s+(?:am\s+)?)?(?:out|sell|sold|exit|close)(?:@\w+)?(?:\s+of)?\s+([A-Za-z0-9&\-\.: ]+?)(?:\s+[0-9.]+)?\s*$", text, re.I)
         mi = re.match(r"^/?(?:i\s+)?(?:in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.: ]+?)(?:\s+[0-9.]+)?\s*$", text, re.I)
@@ -676,15 +677,50 @@ def looks_like_code(text):
     return find_code(text) is not None
 
 
-def try_code(st, message_id, text):
+def code_age_seconds(code):
+    """How old the FYERS code was when I read it (the code carries its own issue time). None if it cannot be read."""
+    try:
+        part = (code or "").split(".")[1]
+        part += "=" * (-len(part) % 4)
+        iat = json.loads(base64.urlsafe_b64decode(part)).get("iat")
+        return int(time.time() - int(iat)) if iat else None
+    except Exception:
+        return None
+
+
+def ist_clock(ts):
+    return datetime.fromtimestamp(ts, IST).strftime("%H:%M:%S")
+
+
+def human_wait(sec):
+    sec = max(int(sec), 0)
+    return "%d s" % sec if sec < 90 else "%d min %d s" % (sec // 60, sec % 60)
+
+
+def try_code(st, message_id, text, sent_ts=None):
     """You pasted a code: say so at once, try the login, and ALWAYS tell you how it went. True when the login worked."""
     tg_delete(message_id)
-    send("🔑 Code received - logging in to FYERS...")
+    nowt = time.time()
+    age = code_age_seconds(find_code(text))
+    bits = []
+    if sent_ts:
+        bits.append("you sent it %s, I read it %s: it waited %s" % (ist_clock(sent_ts), ist_clock(nowt), human_wait(nowt - sent_ts)))
+    if age is not None:
+        bits.append("FYERS made the code %s before I read it" % human_wait(age))
+    print("login code timing: %s" % ("; ".join(bits) or "unknown"), flush=True)
+    send("🔑 Code received%s - logging in to FYERS..." % ((" (" + "; ".join(bits) + ")") if bits else ""))
     try:
         cmd_login(find_code(text), datetime.now(IST))
         return True
     except FD.FyersError as e:
-        send("❌ That code did not work (%s). Tap the login link again and send me the new code quickly - codes expire fast." % e)
+        age = code_age_seconds(find_code(text))
+        if age is None:
+            hint = "I could not read the time this code was made."
+        elif age > 150:
+            hint = "This code was already %d minutes %d seconds old when I read it. FYERS accepts a code only for a minute or two, so it had expired." % (age // 60, age % 60)
+        else:
+            hint = "This code was only %d seconds old, so it was fresh and FYERS still refused it. That points to the app id or secret, or to a code that was already used once." % age
+        send("❌ That code did not work (%s)\n\n%s\nTap the new link I send next and paste the new code AT ONCE, while I am listening." % (str(e)[:160], hint))
     except (Exception, SystemExit) as e:
         send("❌ Login problem: %s" % (str(e)[:250] or type(e).__name__))
     st["login_prompt_ts"] = 0
@@ -727,7 +763,7 @@ def wait_for_login(st, now, minutes, quiet=False):
             if not looks_like_code(text):
                 continue                                         # keep other messages for the normal scan
             st["tg_offset"] = u["update_id"] + 1
-            if try_code(st, m.get("message_id"), text):
+            if try_code(st, m.get("message_id"), text, m.get("date")):
                 return True
         time.sleep(2)
     if not quiet:
