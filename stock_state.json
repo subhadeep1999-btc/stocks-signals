@@ -19,7 +19,9 @@
  "day": "2026-11-25",
  "holdings": {
   "GRSE": {
-   "entry_ts": null,
+   "entry_label": "bullish TSI crossover, 25 Nov 11:15",
+   "entry_price": 2033.7,
+   "entry_ts": 1795585500,
    "since": 1795620605
   }
  },
@@ -27,9 +29,9 @@
  "login_prompt_ts": 1795660236,
  "refresh_day": "2026-11-26",
  "reminded": false,
- "report_day": "2026-11-25",
+ "report_day": "2026-11-26",
  "summary": false,
- "tg_offset": 758828033,
+ "tg_offset": 758828034,
  "watermark": {
   "ADANIENSOL": 1795599900,
   "ADANIENT": 1795599900,
