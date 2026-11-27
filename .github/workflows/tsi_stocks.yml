@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       cmd:
-        description: "scan | poll | refresh | login-link | check  (poll = only read my Telegram messages and login code; refresh = automatic login or send me the login link; login-link = send me the login link)"
+        description: "scan | ema | poll | refresh | login-link | check  (ema = System 2 15-minute scan; poll = only read my Telegram messages and login code; refresh = automatic login or send me the login link; login-link = send me the login link)"
         default: "scan"
         type: string
       auth_code:
@@ -30,8 +30,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install requests
-        run: pip install requests
+      - name: Install packages
+        run: pip install requests matplotlib
 
       - name: Today's date (IST)
         run: echo "DAY=$(TZ=Asia/Kolkata date +%F)" >> "$GITHUB_ENV"
