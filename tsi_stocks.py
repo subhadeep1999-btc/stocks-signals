@@ -6,8 +6,8 @@ TSI signals for Indian stocks on FYERS data (signals only - this program never p
     NSE candles start at 9:15, so the 1h candles are 9:15, 10:15 ... 14:15 and a short 15:15-15:30 one, and the 45m
     candles are 9:15, 10:00, 10:45, 11:30, 12:15, 13:00, 13:45, 14:30 and a short 15:15-15:30 one. The readings
     therefore become known at 10:45, 11:30, 12:15, 13:45, 14:30, 15:15 and 15:30 IST.
-  * SYSTEM 1: BULLISH crossover (TSI crosses above its signal line) on any stock in stocks.txt -> Telegram alert.
-  * SYSTEM 2: EMA 5 (source close) on 2-hour candles, compared with every finished 1h candle close:
+  * RULE 1: BULLISH crossover (TSI crosses above its signal line) on any stock in stocks.txt -> Telegram alert.
+  * RULE 2: EMA 5 (source close) on 2-hour candles, compared with every finished 1h candle close:
       TSI bullish -> alert when a 1h candle CLOSES BELOW the 2h 5 EMA (first close on that side)
       TSI bearish -> alert when a 1h candle CLOSES ABOVE the 2h 5 EMA (first close on that side)
     (the TSI state used is the latest 45m reading already finished at that moment.)
@@ -21,7 +21,10 @@ TSI signals for Indian stocks on FYERS data (signals only - this program never p
     (or sending: out RELIANCE) makes it stop tracking that stock.
   * Intraday or overnight is your decision: positions stay tracked until you press Out. Other messages: list | help
 
-Commands (GitHub workflow "tsi-stocks"):  --login-link | --login | --refresh | --check | --scan
+Two systems live in this repo. SYSTEM 1 = everything above (hourly TSI + 2h EMA). SYSTEM 2 = 5 EMA(30m) on the 15m chart (ema_system.py).
+You choose with the buttons / messages "system 1" and "system 2"; the choice is remembered (st["system"]).
+
+Commands (GitHub workflow "tsi-stocks"):  --login-link | --login | --refresh | --check | --scan | --poll | --ema
 The FYERS token (valid until 6:30 AM next day) is kept in the GitHub Actions cache by the workflow, never in the repo.
 """
 import base64
@@ -36,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+import ema_system as S2
 import fyers_daily as FD
 from fyers_daily import IST, env, send
 
@@ -283,6 +287,22 @@ def fyers_symbol(sym):
     return "NSE:%s-EQ" % sym
 
 
+SWITCH_ROWS = [[("System 1 - TSI hourly", "sys:1"), ("System 2 - 5 EMA 15m", "sys:2")]]
+
+
+def switch_system(st, n):
+    """You chose System 1 or 2. Only the active one scans and sends alerts; the other one's tracked trades are kept but not watched."""
+    st["system"] = n
+    note = ""
+    if n == 1 and st.get("s2", {}).get("trades"):
+        note = "\n⚠️ You still have System 2 trades open (%s). They are NOT watched while System 1 is active." % ", ".join(sorted(st["s2"]["trades"]))
+    if n == 2 and st.get("holdings"):
+        note = "\n⚠️ System 1 is tracking %s. It is NOT watched while System 2 is active." % ", ".join(sorted(st["holdings"]))
+    what = ("hourly TSI crossover + 2h EMA alerts, as before" if n == 1 else
+            "5 EMA (30m) on the 15m chart. Signals come as one green (bullish) list and one red (bearish) list, with BUY / SELL buttons below")
+    return ("✅ System %d is now active: %s.%s\n\nSwitch any time: tap a button or send system 1 / system 2." % (n, what, note), SWITCH_ROWS)
+
+
 def poll_commands(st, now_ts):
     """Read what you sent the bot since last time. A plain stock name = "I bought it, track it".
     Returns the replies as [(text, buttons or None)]."""
@@ -337,6 +357,20 @@ def poll_commands(st, now_ts):
         low = text.lower()
         if looks_like_code(text):
             try_code(st, m.get("message_id"), text, m.get("date"))
+            continue
+        msw = re.match(r"^/?(?:system|sys)\s*([12])\b", text, re.I) or re.match(r"^s([12])$", low)
+        if msw:
+            replies.append(switch_system(st, int(msw.group(1))))
+            continue
+        if low in ("system", "/system", "menu", "/menu", "systems"):
+            replies.append(("Active: System %d.\nSystem 1 = hourly TSI crossover + 2h EMA alerts.\nSystem 2 = 5 EMA (30m) on the 15m chart with BUY / SELL buttons.\nTap one:" % st.get("system", 1), SWITCH_ROWS))
+            continue
+        if st.get("system") == 2 or re.match(r"^sl\s", text, re.I):
+            r2 = S2.handle_text(st, text, when)
+            if r2 is not None:
+                replies += r2
+            elif st.get("system") == 2 and text:
+                replies.append(("System 2 is active. I did not understand \"%s\". Messages: list | OUT <name> | <name> <price> | system 1" % text[:40], None))
             continue
         mo = re.match(r"^/?(?:i\s+(?:am\s+)?)?(?:out|sell|sold|exit|close)(?:@\w+)?(?:\s+of)?\s+([A-Za-z0-9&\-\.: ]+?)(?:\s+[0-9.]+)?\s*$", text, re.I)
         mi = re.match(r"^/?(?:i\s+)?(?:in|buy|bought|long)(?:@\w+)?\s+([A-Za-z0-9&\-\.: ]+?)(?:\s+[0-9.]+)?\s*$", text, re.I)
@@ -881,6 +915,11 @@ def morning_report(token, st, now):
         st["report_day"] = today
 
 
+S2.NORM = norm
+S2.SEND_BUTTONS = send_buttons
+S2.WAIT_FOR_CANDLE = wait_for_candle
+
+
 def deliver(replies):
     for text, buttons in replies:
         send_buttons(text, buttons) if buttons else send(text)
@@ -931,6 +970,14 @@ def main():
             if not token:
                 print("No FYERS token yet.")
                 return
+        if st.get("system") == 2 and "--check" not in sys.argv:    # System 2: read your messages first (so "system 1" works at once), then its own run
+            deliver(poll_commands(st, int(now.timestamp())))
+        if st.get("system") == 2 and "--check" not in sys.argv:
+            deliver(S2.run(token, st, now, full="--poll" not in sys.argv))
+            return
+        if "--ema" in sys.argv:
+            print("System 1 is active, so the System 2 (ema) job did nothing.", flush=True)
+            return
         if "--check" not in sys.argv:
             try:
                 morning_report(token, st, now)
@@ -943,7 +990,7 @@ def main():
         elif "--scan" in sys.argv:
             scan(token, st, now)
         else:
-            raise SystemExit("Use --login-link, --login, --refresh, --check, --poll or --scan.")
+            raise SystemExit("Use --login-link, --login, --refresh, --check, --poll, --scan or --ema.")
     finally:
         save_state(st)
 
